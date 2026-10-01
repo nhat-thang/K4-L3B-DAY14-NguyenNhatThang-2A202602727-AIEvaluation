@@ -1,4 +1,4 @@
-"""OrbitTech Store Customer Support RAG system under evaluation.
+﻿"""OrbitTech Store Customer Support RAG system under evaluation.
 
 This module owns retrieval and answer generation only. It never computes
 evaluation metrics and never uses golden expected answers or gold evidence to
@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from dotenv import load_dotenv
-from openai import OpenAI, OpenAIError
+from openai import OpenAI, OpenAIError, RateLimitError
 
 load_dotenv(Path(__file__).resolve().with_name(".env"))
 
@@ -250,17 +250,37 @@ class OpenAIGenerator:
             raise RuntimeError("OPENAI_API_KEY is missing from .env")
         if not self.model:
             raise RuntimeError("OPENAI_MODEL is missing from .env")
-        self.client = OpenAI(api_key=api_key)
+        # Optional OpenAI-compatible endpoint (e.g. Gemini). Such providers usually
+        # support only the Chat Completions API, not the Responses API.
+        self.base_url = os.getenv("OPENAI_BASE_URL", "").strip() or None
+        self.client = OpenAI(api_key=api_key, base_url=self.base_url)
         self.max_output_tokens = max_output_tokens
 
     def generate(self, prompt: str) -> str:
-        response = self.client.responses.create(
-            model=self.model,
-            input=prompt,
-            temperature=0,
-            max_output_tokens=self.max_output_tokens,
-        )
-        answer = response.output_text.strip()
+        if self.base_url:
+            # Free tiers allow only a few requests per minute: wait and retry on 429.
+            for attempt in range(5):
+                try:
+                    completion = self.client.chat.completions.create(
+                        model=self.model,
+                        messages=[{"role": "user", "content": prompt}],
+                        temperature=0,
+                        max_tokens=self.max_output_tokens,
+                    )
+                    break
+                except RateLimitError:
+                    if attempt == 4:
+                        raise
+                    time.sleep(30)
+            answer = (completion.choices[0].message.content or "").strip()
+        else:
+            response = self.client.responses.create(
+                model=self.model,
+                input=prompt,
+                temperature=0,
+                max_output_tokens=self.max_output_tokens,
+            )
+            answer = response.output_text.strip()
         if not answer:
             raise RuntimeError("OpenAI returned an empty answer")
         return answer
